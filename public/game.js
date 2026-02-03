@@ -1,243 +1,239 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
-// --- INICIALIZAÇÃO E UI ---
-const startBtn = document.getElementById('start-btn');
-startBtn.addEventListener('click', () => {
-    if (document.documentElement.requestFullscreen) document.documentElement.requestFullscreen();
-    if (screen.orientation && screen.orientation.lock) screen.orientation.lock('landscape').catch(() => {});
-    startBtn.style.display = 'none';
-    initWorld();
+// --- GERENCIAMENTO DE UI & SOCKET ---
+const socket = io();
+let currentRoomId = null;
+
+// Elementos DOM
+const loginScreen = document.getElementById('login-screen');
+const lobbyScreen = document.getElementById('lobby-screen');
+const gameUI = document.getElementById('game-ui');
+const authMsg = document.getElementById('auth-msg');
+
+// Eventos de Login
+document.getElementById('btn-login').onclick = () => {
+    socket.emit('login', { user: document.getElementById('username').value, pass: document.getElementById('password').value });
+};
+document.getElementById('btn-register').onclick = () => {
+    socket.emit('register', { user: document.getElementById('username').value, pass: document.getElementById('password').value });
+};
+
+socket.on('authError', (msg) => { authMsg.innerText = msg; });
+socket.on('authSuccess', (user) => {
+    loginScreen.classList.add('hidden');
+    lobbyScreen.classList.remove('hidden');
+    socket.emit('refreshRooms');
 });
 
-// Nipple.js Loader
+// Eventos de Lobby
+document.getElementById('btn-create-room').onclick = () => {
+    socket.emit('createRoom', document.getElementById('new-room-name').value);
+};
+
+socket.on('roomList', (rooms) => {
+    const list = document.getElementById('room-list');
+    list.innerHTML = '';
+    rooms.forEach(r => {
+        const div = document.createElement('div');
+        div.className = 'room-item';
+        div.innerHTML = `<span>${r.id}</span> <span>${r.count} Players</span>`;
+        div.onclick = () => socket.emit('joinRoom', r.id);
+        list.appendChild(div);
+    });
+});
+
+socket.on('joinSuccess', (data) => {
+    // Entra no jogo!
+    currentRoomId = data.roomId;
+    lobbyScreen.classList.add('hidden');
+    gameUI.classList.remove('hidden');
+    
+    // Solicita Fullscreen
+    if (document.documentElement.requestFullscreen) document.documentElement.requestFullscreen();
+    if (screen.orientation && screen.orientation.lock) screen.orientation.lock('landscape').catch(() => {});
+
+    // Inicia o mundo 3D
+    initWorld(data.initialPos, data.players);
+});
+
+// --- LÓGICA DO JOGO (ENGINE) ---
+
+// Nipple.js
 const script = document.createElement('script');
 script.src = "https://cdnjs.cloudflare.com/ajax/libs/nipplejs/0.10.1/nipplejs.min.js";
-script.onload = () => { /* Nipple pronto */ };
+script.onload = () => { /* Ready */ };
 document.head.appendChild(script);
 
-// Controles de Ação
+// Controles
 let jumpPressed = false;
 document.getElementById('jump-btn').addEventListener('touchstart', (e) => { e.preventDefault(); jumpPressed = true; });
 
-// --- CENA THREE.JS ---
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x87CEEB);
-scene.fog = new THREE.Fog(0x87CEEB, 10, 100); // Neblina ajustada
-
-const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.shadowMap.enabled = true;
-document.body.appendChild(renderer.domElement);
-
-const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
-scene.add(ambientLight);
-const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
-dirLight.position.set(20, 50, 20);
-dirLight.castShadow = true;
-// Otimização de sombras
-dirLight.shadow.mapSize.width = 1024;
-dirLight.shadow.mapSize.height = 1024;
-scene.add(dirLight);
-
-// --- ESTADO DO JOGO ---
-const socket = io();
+// Three.js Vars
+let scene, camera, renderer, localPlayerMesh;
 const remotePlayers = {};
-let localPlayerMesh = null;
-let mixer = null; // Para animações no futuro
+const gltfLoader = new GLTFLoader();
 
-// Física e Movimento
+// Física & Gameplay Vars
+const MAP_HALF_SIZE = 250; // O plano tem 500, então vai de -250 a 250
 const physics = {
     velocity_y: 0,
     gravity: 0.02,
     jumpForce: 0.5,
-    isGrounded: false,
-    speed: 0.4
+    speed: 0.4,
+    inVoid: false
 };
 
-// Câmera Orbital (Free Fire Style)
+// Câmera Config (Over the Shoulder)
 const cameraState = {
-    yaw: 0,   // Rotação horizontal (radianos)
-    pitch: 0.3, // Rotação vertical (radianos) - começa levemente olhando de cima
-    dist: 8   // Distância da câmera ao personagem
+    yaw: 0,
+    pitch: 0.1, // Começa mais horizontal
+    dist: 4,    // Mais perto (antes era 8)
+    shoulderOffset: 1.5 // Desvio para a direita (Over the shoulder)
 };
 
-// Inputs
 const inputs = { forward: 0, turn: 0 };
 let touchStart = { x: 0, y: 0 };
 let isCameraTouch = false;
 
-// Loaders
-const gltfLoader = new GLTFLoader();
-const textureLoader = new THREE.TextureLoader();
+function initWorld(initialPos, existingPlayers) {
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x87CEEB);
+    scene.fog = new THREE.Fog(0x87CEEB, 10, 150);
 
-// --- INICIALIZAÇÃO ---
-async function initWorld() {
-    // Chão
-    const groundTexture = textureLoader.load('./assets/txt.png');
-    groundTexture.wrapS = THREE.RepeatWrapping;
-    groundTexture.wrapT = THREE.RepeatWrapping;
-    groundTexture.repeat.set(100, 100);
-    const ground = new THREE.Mesh(
-        new THREE.PlaneGeometry(1000, 1000),
-        new THREE.MeshStandardMaterial({ map: groundTexture })
-    );
+    // Câmera (FOV menor para parecer mais 'cinemático' como shooters)
+    camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.1, 1000);
+    
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    document.body.appendChild(renderer.domElement);
+    
+    // Luzes
+    const amb = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(amb);
+    const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+    dir.position.set(50, 100, 50);
+    dir.castShadow = true;
+    dir.shadow.mapSize.set(2048, 2048); // Sombras melhores
+    scene.add(dir);
+
+    // Chão (Ground)
+    const txt = new THREE.TextureLoader().load('./assets/txt.png');
+    txt.wrapS = THREE.RepeatWrapping; txt.wrapT = THREE.RepeatWrapping;
+    txt.repeat.set(50, 50);
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(500, 500), new THREE.MeshStandardMaterial({ map: txt }));
     ground.rotation.x = -Math.PI / 2;
     ground.receiveShadow = true;
     scene.add(ground);
 
-    createLocalPlayer();
+    // Jogadores Existentes
+    Object.keys(existingPlayers).forEach(id => {
+        if (id !== socket.id) addRemotePlayer(id, existingPlayers[id]);
+    });
+
+    // Jogador Local
+    createLocalPlayer(initialPos);
     initJoystick();
     animate();
 }
 
-function createLocalPlayer() {
+function createLocalPlayer(pos) {
     gltfLoader.load('./assets/player.glb', (gltf) => {
         localPlayerMesh = gltf.scene;
-        // Ajuste de escala se necessário (depende do seu modelo)
-        localPlayerMesh.scale.set(1, 1, 1); 
+        localPlayerMesh.position.set(pos.x, pos.y, pos.z);
+        localPlayerMesh.rotation.y = pos.rotation;
         localPlayerMesh.traverse(c => { if(c.isMesh) c.castShadow = true; });
         scene.add(localPlayerMesh);
     });
 }
 
-// --- CONTROLES (TOUCH) ---
-function initJoystick() {
-    const zone = document.getElementById('joystick-zone');
-    const manager = nipplejs.create({
-        zone: zone, mode: 'static', position: { left: '50%', top: '50%' }, color: 'white'
-    });
-    manager.on('move', (evt, data) => {
-        if (data && data.vector) {
-            inputs.forward = data.vector.y;
-            inputs.turn = data.vector.x;
-        }
-    });
-    manager.on('end', () => { inputs.forward = 0; inputs.turn = 0; });
-}
+// --- FÍSICA E CÂMERA AVANÇADA ---
 
-// Lógica de Câmera (Deslizar dedo na tela)
-document.addEventListener('touchstart', (e) => {
-    for (let i = 0; i < e.touches.length; i++) {
-        const t = e.touches[i];
-        if (t.target.id === 'joystick-zone' || t.target.closest('#joystick-zone')) continue;
-        if (t.target.classList.contains('action-btn')) continue;
-
-        // Tocou na área livre (Câmera)
-        touchStart.x = t.clientX;
-        touchStart.y = t.clientY;
-        isCameraTouch = true;
-    }
-}, { passive: false });
-
-document.addEventListener('touchmove', (e) => {
-    if (!isCameraTouch) return;
-    e.preventDefault(); 
-
-    for (let i = 0; i < e.touches.length; i++) {
-        const t = e.touches[i];
-        if (t.target.id === 'joystick-zone' || t.target.closest('#joystick-zone')) continue;
-
-        // Se o toque se moveu significativamente
-        const deltaX = t.clientX - touchStart.x;
-        const deltaY = t.clientY - touchStart.y;
-
-        // Sensibilidade
-        cameraState.yaw -= deltaX * 0.005;
-        cameraState.pitch -= deltaY * 0.005;
-
-        // Travar Pitch (Não dar cambalhota completa)
-        // Limita entre olhar quase tudo pra cima e olhar de cima pra baixo
-        const minPitch = -Math.PI / 6; // -30 graus
-        const maxPitch = Math.PI / 2.5; // ~70 graus
-        cameraState.pitch = Math.max(minPitch, Math.min(maxPitch, cameraState.pitch));
-
-        touchStart.x = t.clientX;
-        touchStart.y = t.clientY;
-    }
-}, { passive: false });
-
-document.addEventListener('touchend', () => { isCameraTouch = false; });
-
-// --- LÓGICA DO JOGO E FÍSICA ---
 function updatePhysics() {
     if (!localPlayerMesh) return;
+    const pos = localPlayerMesh.position;
 
-    // 1. Gravidade
+    // 1. Checar se está dentro do Mapa (Void Logic)
+    // O mapa vai de -250 a 250 no X e Z
+    const onGround = (pos.x > -MAP_HALF_SIZE && pos.x < MAP_HALF_SIZE && pos.z > -MAP_HALF_SIZE && pos.z < MAP_HALF_SIZE);
+
+    // Aplica Gravidade
     physics.velocity_y -= physics.gravity;
-    localPlayerMesh.position.y += physics.velocity_y;
+    pos.y += physics.velocity_y;
 
-    // 2. Colisão com Chão (Chão está em Y=0)
-    if (localPlayerMesh.position.y <= 0) {
-        localPlayerMesh.position.y = 0;
-        physics.velocity_y = 0;
-        physics.isGrounded = true;
-    } else {
-        physics.isGrounded = false;
-    }
-
-    // 3. Pulo
-    if (jumpPressed) {
-        if (physics.isGrounded) {
-            physics.velocity_y = physics.jumpForce;
+    if (onGround) {
+        // Colisão com chão
+        if (pos.y <= 0) {
+            pos.y = 0;
+            physics.velocity_y = 0;
+            // Pulo
+            if (jumpPressed) {
+                physics.velocity_y = physics.jumpForce;
+                jumpPressed = false;
+            }
         }
-        jumpPressed = false; // Reset imediato do input
+    } else {
+        // Está no Void - cai para sempre
+        physics.inVoid = true;
+        // Reset se cair muito (opcional)
+        if (pos.y < -50) {
+            pos.y = 20; pos.x = 0; pos.z = 0;
+            physics.velocity_y = 0;
+        }
     }
 }
 
-function updateMovementAndCamera() {
+function updateCameraAndMovement() {
     if (!localPlayerMesh) return;
 
-    // --- POSICIONAR CÂMERA ---
-    // A câmera orbita em torno do jogador usando Trigonometria Esférica
-    // Offset da câmera relativo ao jogador
-    const hDist = cameraState.dist * Math.cos(cameraState.pitch); // Distância horizontal
-    const vDist = cameraState.dist * Math.sin(cameraState.pitch); // Distância vertical (altura)
+    // --- POSICIONAMENTO OVER THE SHOULDER ---
+    // 1. Calcular posição esférica baseada no PITCH e YAW em torno do pivô (Personagem)
+    // Mas NÃO movemos a câmera ainda.
+    
+    // Distância horizontal e vertical
+    const hDist = cameraState.dist * Math.cos(cameraState.pitch);
+    const vDist = cameraState.dist * Math.sin(cameraState.pitch);
 
+    // Offsets baseados na rotação da câmera
     const offsetX = hDist * Math.sin(cameraState.yaw);
     const offsetZ = hDist * Math.cos(cameraState.yaw);
 
-    // Nova Posição da Câmera
-    camera.position.x = localPlayerMesh.position.x + offsetX;
-    camera.position.z = localPlayerMesh.position.z + offsetZ;
-    camera.position.y = localPlayerMesh.position.y + vDist + 2; // +2 para mirar no ombro/cabeça
+    // Posição ideal da câmera (CENTRALIZADA)
+    const targetX = localPlayerMesh.position.x + offsetX;
+    const targetZ = localPlayerMesh.position.z + offsetZ;
+    const targetY = localPlayerMesh.position.y + vDist + 1.5; // +1.5 altura da cabeça
 
-    // A câmera sempre olha para o jogador (mais um pouco para cima para a mira ficar centralizada no mundo)
+    camera.position.set(targetX, targetY, targetZ);
+    
+    // Câmera olha para o jogador (com leve ajuste vertical pra mira)
     camera.lookAt(localPlayerMesh.position.x, localPlayerMesh.position.y + 1.5, localPlayerMesh.position.z);
 
+    // --- TRUQUE DO OMBRO (Deslizar para a direita) ---
+    // Move a câmera localmente no eixo X dela mesma.
+    // Como ela já está olhando pro player, X positivo é direita.
+    camera.translateX(cameraState.shoulderOffset);
 
-    // --- MOVER JOGADOR ---
+    // --- MOVIMENTO DO PERSONAGEM ---
     let moved = false;
-    
-    // Se houver input do joystick
     if (inputs.forward !== 0 || inputs.turn !== 0) {
-        // Calcular o ângulo frontal da CÂMERA (apenas no plano horizontal Y)
-        // Queremos que "Frente" no joystick seja "Frente" da visão da câmera
-        const cameraDir = new THREE.Vector3();
-        camera.getWorldDirection(cameraDir);
-        const theta = Math.atan2(cameraDir.x, cameraDir.z); // Ângulo da câmera
+        // O "Frente" agora depende de onde a câmera está olhando no plano horizontal
+        const camDir = new THREE.Vector3();
+        camera.getWorldDirection(camDir);
+        const theta = Math.atan2(camDir.x, camDir.z); // Ângulo Y global da câmera
 
-        // Calcular vetor de movimento baseado no joystick + ângulo da câmera
-        // forward (Y do joystick) é invertido no cálculo 3D padrão
+        // Inputs
         const moveX = inputs.turn * Math.cos(theta) + inputs.forward * Math.sin(theta);
         const moveZ = -inputs.turn * Math.sin(theta) + inputs.forward * Math.cos(theta);
 
         localPlayerMesh.position.x += moveX * physics.speed;
         localPlayerMesh.position.z += moveZ * physics.speed;
 
-        // Rotacionar o PERSONAGEM para olhar para onde está andando
-        const moveAngle = Math.atan2(moveX, moveZ);
-        // Suavizar rotação (Lerp)
-        const targetRot = moveAngle;
-        // Lógica simples para rotação mais curta
-        localPlayerMesh.rotation.y = targetRot;
-
+        // Girar o personagem para a direção do movimento
+        localPlayerMesh.rotation.y = Math.atan2(moveX, moveZ);
         moved = true;
     }
 
-    // --- ENVIAR REDE ---
-    // Enviamos a posição se moveu ou se está pulando/caindo (y mudou)
     if (moved || Math.abs(physics.velocity_y) > 0) {
         socket.emit('playerMove', {
             x: localPlayerMesh.position.x,
@@ -248,23 +244,44 @@ function updateMovementAndCamera() {
     }
 }
 
-// --- REDE (OUTROS JOGADORES) ---
-// Mesma lógica de antes, apenas garante atualização
-socket.on('currentPlayers', (players) => {
-    Object.keys(players).forEach(id => { if(id !== socket.id) addRemotePlayer(id, players[id]); });
-});
+// --- INPUTS & SOCKETS ---
+function initJoystick() {
+    const manager = nipplejs.create({
+        zone: document.getElementById('joystick-zone'),
+        mode: 'static', position: { left: '50%', top: '50%' }, color: 'white'
+    });
+    manager.on('move', (evt, data) => {
+        if (data && data.vector) { inputs.forward = data.vector.y; inputs.turn = data.vector.x; }
+    });
+    manager.on('end', () => { inputs.forward = 0; inputs.turn = 0; });
+}
+
+// Touch Câmera
+document.addEventListener('touchstart', (e) => {
+    const t = e.touches[0];
+    if (t.target.closest('#joystick-zone') || t.target.closest('.action-btn')) return;
+    touchStart.x = t.clientX; touchStart.y = t.clientY; isCameraTouch = true;
+}, { passive: false });
+
+document.addEventListener('touchmove', (e) => {
+    if (!isCameraTouch) return;
+    const t = e.touches[0];
+    const deltaX = t.clientX - touchStart.x;
+    const deltaY = t.clientY - touchStart.y;
+    
+    cameraState.yaw -= deltaX * 0.005;
+    cameraState.pitch -= deltaY * 0.005;
+    // Limites verticais
+    cameraState.pitch = Math.max(-Math.PI/4, Math.min(Math.PI/2.2, cameraState.pitch));
+
+    touchStart.x = t.clientX; touchStart.y = t.clientY;
+}, { passive: false });
+document.addEventListener('touchend', () => isCameraTouch = false);
+
+// Rede
 socket.on('newPlayer', (p) => addRemotePlayer(p.id, p));
-socket.on('playerDisconnect', (id) => {
-    if (remotePlayers[id]) { scene.remove(remotePlayers[id]); delete remotePlayers[id]; }
-});
-socket.on('playerMoved', (data) => {
-    const p = remotePlayers[data.id];
-    if (p) {
-        // Interpolação simples
-        p.position.set(data.x, data.y, data.z);
-        p.rotation.y = data.rotation;
-    }
-});
+socket.on('playerDisconnect', (id) => { if(remotePlayers[id]) { scene.remove(remotePlayers[id]); delete remotePlayers[id]; }});
+socket.on('playerMoved', (d) => { if(remotePlayers[d.id]) { remotePlayers[d.id].position.set(d.x, d.y, d.z); remotePlayers[d.id].rotation.y = d.rotation; }});
 
 function addRemotePlayer(id, data) {
     gltfLoader.load('./assets/player.glb', (gltf) => {
@@ -278,11 +295,10 @@ function addRemotePlayer(id, data) {
 function animate() {
     requestAnimationFrame(animate);
     updatePhysics();
-    updateMovementAndCamera();
+    updateCameraAndMovement();
     renderer.render(scene, camera);
 }
 
-// Resize
 window.addEventListener('resize', () => {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
