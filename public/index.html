@@ -2,16 +2,55 @@
 <html lang="pt-br">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Battle Royale WebGL</title>
     <style>
-        body { margin: 0; overflow: hidden; background-color: #000; }
+        body { margin: 0; overflow: hidden; background-color: #000; touch-action: none; /* Impede zoom/scroll nativo */ }
         canvas { display: block; }
-        #loading {
+        
+        /* UI LAYERS */
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+        
+        /* ZONA DO JOYSTICK (Fixo no canto inferior esquerdo) */
+        #joystick-zone {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            width: 150px;
+            height: 150px;
+            pointer-events: auto; /* Permite toque */
+            z-index: 10;
+            /* background: rgba(255, 0, 0, 0.1); Descomente para ver a area de teste */
+        }
+
+        /* BOTÃO FULLSCREEN / INICIAR */
+        #start-btn {
             position: absolute; top: 50%; left: 50%;
             transform: translate(-50%, -50%);
-            color: white; font-family: sans-serif; font-size: 24px;
-            pointer-events: none;
+            padding: 15px 30px;
+            font-size: 20px;
+            background: #ff9900; color: white; border: none; border-radius: 8px;
+            pointer-events: auto; cursor: pointer;
+            z-index: 20;
+        }
+
+        /* AVISO DE ROTAÇÃO (Só aparece em modo retrato) */
+        #rotate-warning {
+            display: none;
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: #1a1a1a;
+            color: white;
+            z-index: 999;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            font-family: sans-serif;
+        }
+
+        /* Se a altura for maior que a largura (Retrato), mostre o aviso */
+        @media screen and (orientation: portrait) {
+            #rotate-warning { display: flex; }
         }
     </style>
     
@@ -26,7 +65,17 @@
     <script src="/socket.io/socket.io.js"></script>
 </head>
 <body>
-    <div id="loading">Carregando Assets...</div>
+    <div id="rotate-warning">
+        <h1>⚠️ Gire o Celular ⚠️</h1>
+        <p>Este jogo requer modo Paisagem (Deitado)</p>
+    </div>
+
+    <button id="start-btn">ENTRAR NO JOGO (Tela Cheia)</button>
+
+    <div id="ui-layer">
+        <div id="joystick-zone"></div>
+    </div>
+
     <script type="module" src="game.js"></script>
 </body>
 </html>
