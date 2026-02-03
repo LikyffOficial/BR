@@ -7,40 +7,63 @@
     <style>
         body { margin: 0; overflow: hidden; background-color: #1a1a1a; font-family: 'Segoe UI', sans-serif; touch-action: none; user-select: none; color: white; }
         
-        /* TELAS (SCREENS) */
+        /* UTILITÁRIOS */
         .screen { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; background: #1a1a1a; z-index: 100; }
         .hidden { display: none !important; }
-
-        /* ESTILO DOS FORMULÁRIOS */
-        input { padding: 10px; margin: 5px; border-radius: 5px; border: none; font-size: 16px; width: 250px; }
-        button { padding: 10px 20px; margin: 10px; border-radius: 5px; border: none; background: #ff9900; color: white; font-weight: bold; cursor: pointer; font-size: 16px; }
-        button:active { transform: scale(0.95); }
-        .room-item { background: #333; padding: 10px; margin: 5px; width: 300px; display: flex; justify-content: space-between; border-radius: 5px; cursor: pointer; }
-        .room-item:hover { background: #444; }
-
-        /* GAME UI (Só aparece jogando) */
+        input { padding: 10px; margin: 5px; width: 200px; }
+        button { padding: 10px 20px; margin: 10px; background: #ff9900; color: white; border: none; border-radius: 5px; font-weight: bold; }
+        
+        /* UI DO JOGO */
         #game-ui { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 50; }
         
-        /* MIRA (CROSSHAIR) */
-        #crosshair { position: absolute; top: 50%; left: 50%; width: 24px; height: 24px; transform: translate(-50%, -50%); pointer-events: none; }
-        /* Círculo central com ponto */
-        #crosshair::before { content: ''; position: absolute; width: 4px; height: 4px; background: red; border-radius: 50%; top: 50%; left: 50%; transform: translate(-50%, -50%); }
-        /* Aros da mira */
-        #crosshair::after { content: ''; position: absolute; width: 20px; height: 20px; border: 2px solid white; border-radius: 50%; top: 0; left: 0; box-sizing: border-box; opacity: 0.7; }
+        /* BARRA DE VIDA */
+        #health-container {
+            position: absolute; top: 20px; left: 20px; width: 200px; height: 20px;
+            background: rgba(0,0,0,0.5); border: 2px solid white; border-radius: 10px;
+        }
+        #health-bar { width: 100%; height: 100%; background: limegreen; border-radius: 8px; transition: width 0.2s; }
+        
+        /* ARMAS */
+        #weapon-slots {
+            position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
+            display: flex; gap: 10px;
+        }
+        .slot { width: 60px; height: 60px; background: rgba(0,0,0,0.6); border: 2px solid #555; display: flex; align-items: center; justify-content: center; color: #aaa; font-size: 12px; }
+        .slot.active { border-color: #ff9900; color: white; background: rgba(255, 153, 0, 0.2); }
 
+        /* BOTÃO INTERAGIR (LOOT) */
+        #interact-btn {
+            position: absolute; top: 60%; left: 50%; transform: translate(-50%, -50%);
+            width: 80px; height: 80px; background: rgba(255, 255, 0, 0.5);
+            border: 2px solid yellow; border-radius: 50%;
+            display: flex; align-items: center; justify-content: center;
+            pointer-events: auto; font-weight: bold; text-shadow: 1px 1px 2px black;
+            cursor: pointer;
+        }
+
+        /* CONFIGURAÇÕES */
+        #settings-btn { position: absolute; top: 20px; right: 20px; width: 40px; height: 40px; background: #333; pointer-events: auto; display: flex; align-items: center; justify-content: center; border-radius: 5px; border: 1px solid #666; }
+        
+        #settings-modal {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            background: rgba(0,0,0,0.9); padding: 20px; border-radius: 10px; border: 1px solid #ff9900;
+            pointer-events: auto; text-align: center;
+        }
+        
+        /* CONTROLES ANTIGOS */
         #joystick-zone { position: absolute; bottom: 50px; left: 50px; width: 150px; height: 150px; pointer-events: auto; }
         .action-btn { position: absolute; width: 70px; height: 70px; background: rgba(0,0,0,0.3); border: 2px solid rgba(255,255,255,0.5); border-radius: 50%; pointer-events: auto; display: flex; align-items: center; justify-content: center; font-weight: bold; }
         #jump-btn { bottom: 140px; right: 40px; background: rgba(0,100,255,0.4); }
         #shoot-btn { bottom: 50px; right: 80px; width: 80px; height: 80px; background: rgba(255,50,50,0.4); }
-
-        /* AVISO DE ROTAÇÃO */
+        #crosshair { position: absolute; top: 50%; left: 50%; width: 24px; height: 24px; transform: translate(-50%, -50%); }
+        #crosshair::before { content: ''; position: absolute; width: 4px; height: 4px; background: red; border-radius: 50%; top: 50%; left: 50%; transform: translate(-50%, -50%); }
+        #crosshair::after { content: ''; position: absolute; width: 20px; height: 20px; border: 2px solid white; border-radius: 50%; top: 0; left: 0; box-sizing: border-box; }
+        
         #rotate-warning { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: #000; z-index: 999; flex-direction: column; align-items: center; justify-content: center; }
         @media screen and (orientation: portrait) { #rotate-warning { display: flex; } }
     </style>
     
-    <script type="importmap">
-        { "imports": { "three": "https://unpkg.com/three@0.158.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.158.0/examples/jsm/" } }
-    </script>
+    <script type="importmap"> { "imports": { "three": "https://unpkg.com/three@0.158.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.158.0/examples/jsm/" } } </script>
     <script src="/socket.io/socket.io.js"></script>
 </head>
 <body>
@@ -48,27 +71,41 @@
 
     <div id="login-screen" class="screen">
         <h1>Battle Royale</h1>
-        <input type="text" id="username" placeholder="Usuário">
-        <input type="password" id="password" placeholder="Senha">
-        <div>
-            <button id="btn-login">Login</button>
-            <button id="btn-register">Registrar</button>
-        </div>
+        <input type="text" id="username" placeholder="Usuário"><input type="password" id="password" placeholder="Senha">
+        <div><button id="btn-login">Login</button><button id="btn-register">Registrar</button></div>
         <p id="auth-msg" style="color: red;"></p>
     </div>
 
     <div id="lobby-screen" class="screen hidden">
-        <h2>Escolha um Servidor</h2>
-        <div id="room-list" style="height: 200px; overflow-y: auto; margin-bottom: 20px;"></div>
-        <input type="text" id="new-room-name" placeholder="Nome da Sala (Opcional)">
-        <button id="btn-create-room">Criar Sala</button>
+        <h2>Servidores</h2>
+        <div id="room-list" style="margin-bottom: 20px;"></div>
+        <input type="text" id="new-room-name" placeholder="Nome da Sala"><button id="btn-create-room">Criar Sala</button>
     </div>
 
     <div id="game-ui" class="hidden">
+        <div id="health-container"><div id="health-bar"></div></div>
+        
+        <div id="settings-btn">⚙️</div>
+        
+        <div id="interact-btn" class="hidden">PEGAR</div>
+
+        <div id="weapon-slots">
+            <div class="slot active" id="slot-1">Faca</div>
+            <div class="slot" id="slot-2">Vazio</div>
+        </div>
+
         <div id="crosshair"></div>
         <div id="joystick-zone"></div>
         <div id="jump-btn" class="action-btn">PULAR</div>
         <div id="shoot-btn" class="action-btn">TIRO</div>
+    </div>
+
+    <div id="settings-modal" class="hidden">
+        <h3>Configurações</h3>
+        <label>Sensibilidade:</label>
+        <input type="range" id="sens-slider" min="1" max="10" value="5">
+        <br><br>
+        <button id="close-settings">Salvar & Fechar</button>
     </div>
 
     <script type="module" src="game.js"></script>
