@@ -1,195 +1,244 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
-// --- CONTROLE DE TELA CHEIA ---
+// --- INICIALIZAÇÃO E UI ---
 const startBtn = document.getElementById('start-btn');
 startBtn.addEventListener('click', () => {
-    // Solicita tela cheia
-    if (document.documentElement.requestFullscreen) {
-        document.documentElement.requestFullscreen();
-    }
-    // Tenta travar orientação (funciona em Androids modernos/PWA)
-    if (screen.orientation && screen.orientation.lock) {
-        screen.orientation.lock('landscape').catch(e => console.log('Trava de rotação não suportada'));
-    }
+    if (document.documentElement.requestFullscreen) document.documentElement.requestFullscreen();
+    if (screen.orientation && screen.orientation.lock) screen.orientation.lock('landscape').catch(() => {});
     startBtn.style.display = 'none';
-    initWorld(); // Só inicia o jogo real após o clique
+    initWorld();
 });
 
-// --- IMPORTAR NIPPLE.JS DINAMICAMENTE ---
+// Nipple.js Loader
 const script = document.createElement('script');
 script.src = "https://cdnjs.cloudflare.com/ajax/libs/nipplejs/0.10.1/nipplejs.min.js";
-script.onload = () => { /* Carregado */ };
+script.onload = () => { /* Nipple pronto */ };
 document.head.appendChild(script);
 
-// --- SETUP THREE.JS ---
+// Controles de Ação
+let jumpPressed = false;
+document.getElementById('jump-btn').addEventListener('touchstart', (e) => { e.preventDefault(); jumpPressed = true; });
+
+// --- CENA THREE.JS ---
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x87CEEB);
-scene.fog = new THREE.Fog(0x87CEEB, 10, 500);
+scene.fog = new THREE.Fog(0x87CEEB, 10, 100); // Neblina ajustada
 
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
-document.body.appendChild(renderer.domElement); // Canvas vai para o fundo
+document.body.appendChild(renderer.domElement);
 
-// Luzes
-const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
 scene.add(ambientLight);
 const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
-dirLight.position.set(50, 50, 50);
+dirLight.position.set(20, 50, 20);
 dirLight.castShadow = true;
+// Otimização de sombras
+dirLight.shadow.mapSize.width = 1024;
+dirLight.shadow.mapSize.height = 1024;
 scene.add(dirLight);
 
-// --- REDE ---
+// --- ESTADO DO JOGO ---
 const socket = io();
 const remotePlayers = {};
 let localPlayerMesh = null;
-let joystickManager = null;
+let mixer = null; // Para animações no futuro
 
-// --- INPUTS ---
+// Física e Movimento
+const physics = {
+    velocity_y: 0,
+    gravity: 0.02,
+    jumpForce: 0.5,
+    isGrounded: false,
+    speed: 0.4
+};
+
+// Câmera Orbital (Free Fire Style)
+const cameraState = {
+    yaw: 0,   // Rotação horizontal (radianos)
+    pitch: 0.3, // Rotação vertical (radianos) - começa levemente olhando de cima
+    dist: 8   // Distância da câmera ao personagem
+};
+
+// Inputs
 const inputs = { forward: 0, turn: 0 };
-let touchStartX = 0;
+let touchStart = { x: 0, y: 0 };
 let isCameraTouch = false;
 
-// --- LOADERS ---
+// Loaders
 const gltfLoader = new GLTFLoader();
 const textureLoader = new THREE.TextureLoader();
 
+// --- INICIALIZAÇÃO ---
 async function initWorld() {
     // Chão
     const groundTexture = textureLoader.load('./assets/txt.png');
     groundTexture.wrapS = THREE.RepeatWrapping;
     groundTexture.wrapT = THREE.RepeatWrapping;
-    groundTexture.repeat.set(50, 50);
-    
+    groundTexture.repeat.set(100, 100);
     const ground = new THREE.Mesh(
-        new THREE.PlaneGeometry(500, 500),
+        new THREE.PlaneGeometry(1000, 1000),
         new THREE.MeshStandardMaterial({ map: groundTexture })
     );
     ground.rotation.x = -Math.PI / 2;
     ground.receiveShadow = true;
     scene.add(ground);
 
-    // Jogador Local
     createLocalPlayer();
-    
-    // Inicia Joystick
     initJoystick();
-    
-    // Inicia Loop
     animate();
 }
 
 function createLocalPlayer() {
     gltfLoader.load('./assets/player.glb', (gltf) => {
         localPlayerMesh = gltf.scene;
-        localPlayerMesh.position.set(0, 0, 0);
+        // Ajuste de escala se necessário (depende do seu modelo)
+        localPlayerMesh.scale.set(1, 1, 1); 
         localPlayerMesh.traverse(c => { if(c.isMesh) c.castShadow = true; });
         scene.add(localPlayerMesh);
     });
 }
 
-// --- LÓGICA DE CONTROLES REFINADA ---
-
+// --- CONTROLES (TOUCH) ---
 function initJoystick() {
     const zone = document.getElementById('joystick-zone');
-    
-    joystickManager = nipplejs.create({
-        zone: zone,         // OBRIGA o joystick a ficar SÓ nesta div
-        mode: 'static',     // Fixo no lugar
-        position: { left: '50%', top: '50%' }, // Centralizado dentro da div zone
-        color: 'white',
-        size: 100
+    const manager = nipplejs.create({
+        zone: zone, mode: 'static', position: { left: '50%', top: '50%' }, color: 'white'
     });
-
-    joystickManager.on('move', (evt, data) => {
+    manager.on('move', (evt, data) => {
         if (data && data.vector) {
             inputs.forward = data.vector.y;
             inputs.turn = data.vector.x;
         }
     });
-
-    joystickManager.on('end', () => {
-        inputs.forward = 0;
-        inputs.turn = 0;
-    });
+    manager.on('end', () => { inputs.forward = 0; inputs.turn = 0; });
 }
 
-// LÓGICA DE CÂMERA (Separada do Joystick)
+// Lógica de Câmera (Deslizar dedo na tela)
 document.addEventListener('touchstart', (e) => {
-    // Verifica cada toque
     for (let i = 0; i < e.touches.length; i++) {
         const t = e.touches[i];
-        
-        // O elemento que foi tocado
-        const target = t.target;
-        
-        // Se o toque foi DENTRO da zona do joystick, IGNORA para a câmera
-        // O nipple.js cuida do joystick, nós só cuidamos do RESTO
-        if (target.id === 'joystick-zone' || target.closest('#joystick-zone')) {
-            continue; 
-        }
+        if (t.target.id === 'joystick-zone' || t.target.closest('#joystick-zone')) continue;
+        if (t.target.classList.contains('action-btn')) continue;
 
-        // Se chegou aqui, é toque na tela (Câmera)
-        touchStartX = t.clientX;
+        // Tocou na área livre (Câmera)
+        touchStart.x = t.clientX;
+        touchStart.y = t.clientY;
         isCameraTouch = true;
     }
 }, { passive: false });
 
 document.addEventListener('touchmove', (e) => {
-    if (!isCameraTouch || !localPlayerMesh) return;
-    
-    // Novamente, ignoramos toques que estão movendo o joystick visualmente
-    // Mas aqui focamos no ID do toque que iniciou a câmera (simplificado pelo target)
-    if (e.target.id === 'joystick-zone' || e.target.closest('#joystick-zone')) return;
+    if (!isCameraTouch) return;
+    e.preventDefault(); 
 
     for (let i = 0; i < e.touches.length; i++) {
         const t = e.touches[i];
-        
-        // Lógica simples: se o movimento é longe da área do joystick (lado direito ou meio)
-        // Uma verificação extra de segurança:
-        if (t.clientX > 200) { // 200px é margem de segurança da zona esquerda
-             const deltaX = t.clientX - touchStartX;
-             localPlayerMesh.rotation.y -= deltaX * 0.005; 
-             touchStartX = t.clientX;
-        }
+        if (t.target.id === 'joystick-zone' || t.target.closest('#joystick-zone')) continue;
+
+        // Se o toque se moveu significativamente
+        const deltaX = t.clientX - touchStart.x;
+        const deltaY = t.clientY - touchStart.y;
+
+        // Sensibilidade
+        cameraState.yaw -= deltaX * 0.005;
+        cameraState.pitch -= deltaY * 0.005;
+
+        // Travar Pitch (Não dar cambalhota completa)
+        // Limita entre olhar quase tudo pra cima e olhar de cima pra baixo
+        const minPitch = -Math.PI / 6; // -30 graus
+        const maxPitch = Math.PI / 2.5; // ~70 graus
+        cameraState.pitch = Math.max(minPitch, Math.min(maxPitch, cameraState.pitch));
+
+        touchStart.x = t.clientX;
+        touchStart.y = t.clientY;
     }
 }, { passive: false });
 
-document.addEventListener('touchend', () => {
-    isCameraTouch = false;
-});
+document.addEventListener('touchend', () => { isCameraTouch = false; });
 
-
-// --- GAME LOOP ---
-function processInput() {
+// --- LÓGICA DO JOGO E FÍSICA ---
+function updatePhysics() {
     if (!localPlayerMesh) return;
 
-    let moved = false;
-    const speed = 0.5;
+    // 1. Gravidade
+    physics.velocity_y -= physics.gravity;
+    localPlayerMesh.position.y += physics.velocity_y;
 
-    if (inputs.forward !== 0 || inputs.turn !== 0) {
-        // Direção baseada na rotação do personagem
-        const direction = new THREE.Vector3(inputs.turn, 0, -inputs.forward); // X = strafe, Z = frente
-        direction.applyAxisAngle(new THREE.Vector3(0, 1, 0), localPlayerMesh.rotation.y);
-        direction.normalize().multiplyScalar(speed); // Normaliza para não correr mais rápido na diagonal
-
-        // Aplica apenas se houver input real (evita tremedeira)
-        if (inputs.forward !== 0 || inputs.turn !== 0) {
-            localPlayerMesh.position.add(direction);
-            moved = true;
-        }
+    // 2. Colisão com Chão (Chão está em Y=0)
+    if (localPlayerMesh.position.y <= 0) {
+        localPlayerMesh.position.y = 0;
+        physics.velocity_y = 0;
+        physics.isGrounded = true;
+    } else {
+        physics.isGrounded = false;
     }
 
-    // Câmera segue
-    const relativeCameraOffset = new THREE.Vector3(0, 5, 10);
-    const cameraOffset = relativeCameraOffset.applyMatrix4(localPlayerMesh.matrixWorld);
-    camera.position.lerp(cameraOffset, 0.1);
-    camera.lookAt(localPlayerMesh.position.x, localPlayerMesh.position.y + 2, localPlayerMesh.position.z);
+    // 3. Pulo
+    if (jumpPressed) {
+        if (physics.isGrounded) {
+            physics.velocity_y = physics.jumpForce;
+        }
+        jumpPressed = false; // Reset imediato do input
+    }
+}
 
-    // Rede
-    if (moved) {
+function updateMovementAndCamera() {
+    if (!localPlayerMesh) return;
+
+    // --- POSICIONAR CÂMERA ---
+    // A câmera orbita em torno do jogador usando Trigonometria Esférica
+    // Offset da câmera relativo ao jogador
+    const hDist = cameraState.dist * Math.cos(cameraState.pitch); // Distância horizontal
+    const vDist = cameraState.dist * Math.sin(cameraState.pitch); // Distância vertical (altura)
+
+    const offsetX = hDist * Math.sin(cameraState.yaw);
+    const offsetZ = hDist * Math.cos(cameraState.yaw);
+
+    // Nova Posição da Câmera
+    camera.position.x = localPlayerMesh.position.x + offsetX;
+    camera.position.z = localPlayerMesh.position.z + offsetZ;
+    camera.position.y = localPlayerMesh.position.y + vDist + 2; // +2 para mirar no ombro/cabeça
+
+    // A câmera sempre olha para o jogador (mais um pouco para cima para a mira ficar centralizada no mundo)
+    camera.lookAt(localPlayerMesh.position.x, localPlayerMesh.position.y + 1.5, localPlayerMesh.position.z);
+
+
+    // --- MOVER JOGADOR ---
+    let moved = false;
+    
+    // Se houver input do joystick
+    if (inputs.forward !== 0 || inputs.turn !== 0) {
+        // Calcular o ângulo frontal da CÂMERA (apenas no plano horizontal Y)
+        // Queremos que "Frente" no joystick seja "Frente" da visão da câmera
+        const cameraDir = new THREE.Vector3();
+        camera.getWorldDirection(cameraDir);
+        const theta = Math.atan2(cameraDir.x, cameraDir.z); // Ângulo da câmera
+
+        // Calcular vetor de movimento baseado no joystick + ângulo da câmera
+        // forward (Y do joystick) é invertido no cálculo 3D padrão
+        const moveX = inputs.turn * Math.cos(theta) + inputs.forward * Math.sin(theta);
+        const moveZ = -inputs.turn * Math.sin(theta) + inputs.forward * Math.cos(theta);
+
+        localPlayerMesh.position.x += moveX * physics.speed;
+        localPlayerMesh.position.z += moveZ * physics.speed;
+
+        // Rotacionar o PERSONAGEM para olhar para onde está andando
+        const moveAngle = Math.atan2(moveX, moveZ);
+        // Suavizar rotação (Lerp)
+        const targetRot = moveAngle;
+        // Lógica simples para rotação mais curta
+        localPlayerMesh.rotation.y = targetRot;
+
+        moved = true;
+    }
+
+    // --- ENVIAR REDE ---
+    // Enviamos a posição se moveu ou se está pulando/caindo (y mudou)
+    if (moved || Math.abs(physics.velocity_y) > 0) {
         socket.emit('playerMove', {
             x: localPlayerMesh.position.x,
             y: localPlayerMesh.position.y,
@@ -199,11 +248,10 @@ function processInput() {
     }
 }
 
-// SOCKETS (Receber dados)
+// --- REDE (OUTROS JOGADORES) ---
+// Mesma lógica de antes, apenas garante atualização
 socket.on('currentPlayers', (players) => {
-    Object.keys(players).forEach((id) => {
-        if (id !== socket.id) addRemotePlayer(id, players[id]);
-    });
+    Object.keys(players).forEach(id => { if(id !== socket.id) addRemotePlayer(id, players[id]); });
 });
 socket.on('newPlayer', (p) => addRemotePlayer(p.id, p));
 socket.on('playerDisconnect', (id) => {
@@ -212,6 +260,7 @@ socket.on('playerDisconnect', (id) => {
 socket.on('playerMoved', (data) => {
     const p = remotePlayers[data.id];
     if (p) {
+        // Interpolação simples
         p.position.set(data.x, data.y, data.z);
         p.rotation.y = data.rotation;
     }
@@ -221,7 +270,6 @@ function addRemotePlayer(id, data) {
     gltfLoader.load('./assets/player.glb', (gltf) => {
         const mesh = gltf.scene;
         mesh.position.set(data.x, data.y, data.z);
-        mesh.rotation.y = data.rotation;
         scene.add(mesh);
         remotePlayers[id] = mesh;
     });
@@ -229,7 +277,8 @@ function addRemotePlayer(id, data) {
 
 function animate() {
     requestAnimationFrame(animate);
-    processInput();
+    updatePhysics();
+    updateMovementAndCamera();
     renderer.render(scene, camera);
 }
 
