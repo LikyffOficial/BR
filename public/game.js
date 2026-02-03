@@ -1,18 +1,42 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
-// --- CONFIGURAÇÃO INICIAL ---
+// --- IMPORTAR NIPPLE.JS DINAMICAMENTE (Para o Joystick) ---
+const script = document.createElement('script');
+script.src = "https://cdnjs.cloudflare.com/ajax/libs/nipplejs/0.10.1/nipplejs.min.js";
+script.onload = () => { initJoystick(); };
+document.head.appendChild(script);
+
+// --- INTERFACE MOBILE (Botão de Tiro) ---
+const shootBtn = document.createElement('div');
+shootBtn.style.position = 'absolute';
+shootBtn.style.bottom = '50px';
+shootBtn.style.right = '30px';
+shootBtn.style.width = '60px';
+shootBtn.style.height = '60px';
+shootBtn.style.background = 'rgba(255, 0, 0, 0.5)';
+shootBtn.style.borderRadius = '50%';
+shootBtn.style.border = '2px solid white';
+shootBtn.style.display = 'flex';
+shootBtn.style.justifyContent = 'center';
+shootBtn.style.alignItems = 'center';
+shootBtn.style.color = 'white';
+shootBtn.style.userSelect = 'none';
+shootBtn.innerText = 'SHOOT';
+shootBtn.addEventListener('touchstart', (e) => { e.preventDefault(); /* Lógica de tiro aqui */ });
+document.body.appendChild(shootBtn);
+
+// --- CONFIGURAÇÃO THREE.JS ---
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x87CEEB); // Céu azul simples
-scene.fog = new THREE.Fog(0x87CEEB, 10, 500); // Neblina para profundidade
+scene.background = new THREE.Color(0x87CEEB);
+scene.fog = new THREE.Fog(0x87CEEB, 10, 500);
 
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.shadowMap.enabled = true; // Habilitar sombras
+renderer.shadowMap.enabled = true;
 document.body.appendChild(renderer.domElement);
 
-// Luzes
 const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
 scene.add(ambientLight);
 const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
@@ -20,156 +44,162 @@ dirLight.position.set(50, 50, 50);
 dirLight.castShadow = true;
 scene.add(dirLight);
 
-// --- GERENCIAMENTO DE REDE ---
+// --- REDE ---
 const socket = io();
-const remotePlayers = {}; // Armazena os meshes dos outros jogadores
-let localPlayerMesh = null; // Mesh do jogador local
-let playerId = null;
+const remotePlayers = {};
+let localPlayerMesh = null;
+let joystickManager = null;
 
-// --- CARREGADORES ---
+// --- VARIÁVEIS DE CONTROLE ---
+const inputs = {
+    forward: 0, // Valor entre -1 e 1 (Joystick Y)
+    turn: 0     // Valor entre -1 e 1 (Joystick X)
+};
+let touchStartX = 0;
+let targetRotationY = 0; // Para rotação da câmera via touch
+
+// --- LOADERS ---
 const textureLoader = new THREE.TextureLoader();
 const gltfLoader = new GLTFLoader();
 
-// --- CRIAÇÃO DO MUNDO ---
 async function initWorld() {
-    // 1. Chão (Ground)
+    // Chão
     const groundTexture = textureLoader.load('./assets/txt.png');
     groundTexture.wrapS = THREE.RepeatWrapping;
     groundTexture.wrapT = THREE.RepeatWrapping;
-    groundTexture.repeat.set(50, 50); // Repete a textura 50x50 vezes
-
-    const groundGeo = new THREE.PlaneGeometry(500, 500);
-    const groundMat = new THREE.MeshStandardMaterial({ map: groundTexture });
-    const ground = new THREE.Mesh(groundGeo, groundMat);
+    groundTexture.repeat.set(50, 50);
+    const ground = new THREE.Mesh(
+        new THREE.PlaneGeometry(500, 500),
+        new THREE.MeshStandardMaterial({ map: groundTexture })
+    );
     ground.rotation.x = -Math.PI / 2;
     ground.receiveShadow = true;
     scene.add(ground);
 
-    // 2. Casas (Houses) - Espalhamento aleatório
-    gltfLoader.load('./assets/house.glb', (gltf) => {
-        const houseModel = gltf.scene;
-        // Instancia 20 casas aleatórias
-        for (let i = 0; i < 20; i++) {
-            const house = houseModel.clone();
-            const x = (Math.random() - 0.5) * 400; // Random entre -200 e 200
-            const z = (Math.random() - 0.5) * 400;
-            house.position.set(x, 0, z);
-            
-            // Escala ajustável caso o modelo venha muito grande/pequeno
-            house.scale.set(1.5, 1.5, 1.5); 
-            house.castShadow = true;
-            house.receiveShadow = true;
-            scene.add(house);
-        }
-    }, undefined, (error) => console.error('Erro ao carregar casa:', error));
-
-    // 3. Inicializar Jogador Local
+    // Jogador Local
     createLocalPlayer();
+    
+    // Inicia loop
+    animate();
 }
 
 function createLocalPlayer() {
     gltfLoader.load('./assets/player.glb', (gltf) => {
         localPlayerMesh = gltf.scene;
-        localPlayerMesh.position.set(0, 0, 0); // Inicia no centro
-        localPlayerMesh.traverse((child) => {
-            if (child.isMesh) child.castShadow = true;
-        });
+        localPlayerMesh.position.set(0, 0, 0);
         scene.add(localPlayerMesh);
-
-        // Remove tela de loading
         document.getElementById('loading').style.display = 'none';
-
-        // Configurar controles básicos de teclado
-        setupControls();
-        
-        // Iniciar loop de animação apenas após carregar o player
-        animate();
-    }, undefined, (error) => console.error('Erro ao carregar player:', error));
+    });
 }
 
-// --- LÓGICA MULTIPLAYER (CLIENTE) ---
+// --- CONTROLES MOBILE ---
 
-// 1. Receber lista de jogadores que JÁ estão no servidor
-socket.on('currentPlayers', (players) => {
-    Object.keys(players).forEach((id) => {
-        if (id !== socket.id) {
-            addRemotePlayer(id, players[id]);
+// 1. Joystick (Movimento)
+function initJoystick() {
+    const options = {
+        zone: document.body,
+        mode: 'static',
+        position: { left: '50%', top: '50%' }, // Placeholder, será sobrescrito pelo CSS abaixo se quisesse, mas nipple usa position absoluta
+        position: { left: '100px', bottom: '100px' },
+        color: 'white',
+        size: 100
+    };
+    
+    joystickManager = nipplejs.create(options);
+
+    joystickManager.on('move', (evt, data) => {
+        if (data && data.vector) {
+            // Nipple retorna vetor normalizado (y invertido no canvas geralmente, mas aqui y+ é pra cima no joystick)
+            inputs.forward = data.vector.y; 
+            inputs.turn = data.vector.x; 
         }
     });
-});
 
-// 2. Novo jogador entrou
-socket.on('newPlayer', (playerInfo) => {
-    addRemotePlayer(playerInfo.id, playerInfo);
-});
-
-// 3. Jogador desconectou
-socket.on('playerDisconnect', (id) => {
-    if (remotePlayers[id]) {
-        scene.remove(remotePlayers[id]);
-        delete remotePlayers[id];
-    }
-});
-
-// 4. Jogador se moveu
-socket.on('playerMoved', (data) => {
-    const remotePlayer = remotePlayers[data.id];
-    if (remotePlayer) {
-        // Interpolação simples poderia ser aplicada aqui
-        remotePlayer.position.set(data.x, data.y, data.z);
-        remotePlayer.rotation.y = data.rotation;
-    }
-});
-
-function addRemotePlayer(id, data) {
-    gltfLoader.load('./assets/player.glb', (gltf) => {
-        const remoteMesh = gltf.scene;
-        remoteMesh.position.set(data.x, data.y, data.z);
-        remoteMesh.rotation.y = data.rotation;
-        
-        // Opcional: Adicionar uma cor ou tag para diferenciar inimigos
-        
-        scene.add(remoteMesh);
-        remotePlayers[id] = remoteMesh;
+    joystickManager.on('end', () => {
+        inputs.forward = 0;
+        inputs.turn = 0;
     });
 }
 
-// --- CONTROLES DO JOGADOR LOCAL ---
-const keys = { w: false, a: false, s: false, d: false };
-const speed = 0.5;
+// 2. Touch Swipe (Rotação da Câmera/Personagem)
+// Usamos a metade direita da tela para rotacionar
+document.addEventListener('touchstart', (e) => {
+    for (let i = 0; i < e.touches.length; i++) {
+        const t = e.touches[i];
+        if (t.clientX > window.innerWidth / 2) { // Tocou na direita
+            touchStartX = t.clientX;
+        }
+    }
+}, { passive: false });
 
-function setupControls() {
-    window.addEventListener('keydown', (e) => {
-        const key = e.key.toLowerCase();
-        if (keys.hasOwnProperty(key)) keys[key] = true;
-    });
-    window.addEventListener('keyup', (e) => {
-        const key = e.key.toLowerCase();
-        if (keys.hasOwnProperty(key)) keys[key] = false;
-    });
-}
+document.addEventListener('touchmove', (e) => {
+    // Evita scroll da tela
+    e.preventDefault(); 
+    
+    for (let i = 0; i < e.touches.length; i++) {
+        const t = e.touches[i];
+        if (t.clientX > window.innerWidth / 2) {
+            const deltaX = t.clientX - touchStartX;
+            // Sensibilidade da rotação
+            if (localPlayerMesh) {
+                localPlayerMesh.rotation.y -= deltaX * 0.005; 
+            }
+            touchStartX = t.clientX;
+        }
+    }
+}, { passive: false });
 
+// 3. Suporte a Teclado (Para testar no PC)
+window.addEventListener('keydown', (e) => {
+    if(e.key === 'w') inputs.forward = 1;
+    if(e.key === 's') inputs.forward = -1;
+    if(e.key === 'a') inputs.turn = -1;
+    if(e.key === 'd') inputs.turn = 1;
+});
+window.addEventListener('keyup', (e) => {
+    if(['w','s'].includes(e.key)) inputs.forward = 0;
+    if(['a','d'].includes(e.key)) inputs.turn = 0;
+});
+
+
+// --- LÓGICA DO JOGO ---
 function processInput() {
     if (!localPlayerMesh) return;
 
     let moved = false;
-    const oldPosition = localPlayerMesh.position.clone();
-    const oldRotation = localPlayerMesh.rotation.y;
+    const speed = 0.5;
 
-    // Movimentação simples (Relativa ao Mundo)
-    // Para Battle Royale real, o ideal é mover relativo à câmera
-    if (keys.w) { localPlayerMesh.position.z -= speed; localPlayerMesh.rotation.y = Math.PI; moved = true; }
-    if (keys.s) { localPlayerMesh.position.z += speed; localPlayerMesh.rotation.y = 0; moved = true; }
-    if (keys.a) { localPlayerMesh.position.x -= speed; localPlayerMesh.rotation.y = -Math.PI / 2; moved = true; }
-    if (keys.d) { localPlayerMesh.position.x += speed; localPlayerMesh.rotation.y = Math.PI / 2; moved = true; }
+    // Movimento relativo à rotação atual do personagem
+    if (inputs.forward !== 0) {
+        // Mover para frente/trás na direção que o boneco está olhando
+        const dir = new THREE.Vector3(0, 0, -1); // Frente no Three.js geralmente é Z negativo local
+        dir.applyAxisAngle(new THREE.Vector3(0, 1, 0), localPlayerMesh.rotation.y);
+        
+        localPlayerMesh.position.addScaledVector(dir, inputs.forward * speed);
+        moved = true;
+    }
 
-    // Atualizar Câmera (Terceira Pessoa)
-    const cameraOffset = new THREE.Vector3(0, 5, 10); // 5 pra cima, 10 pra trás
-    const cameraPos = localPlayerMesh.position.clone().add(cameraOffset);
-    camera.position.lerp(cameraPos, 0.1); // Suavização da câmera
-    camera.lookAt(localPlayerMesh.position);
+    if (inputs.turn !== 0) {
+        // Opção A: O joystick vira o boneco (estilo carro)
+        // localPlayerMesh.rotation.y -= inputs.turn * 0.05;
+        
+        // Opção B: O joystick faz "strafe" (andar de lado) - Melhor para shooters
+        const dir = new THREE.Vector3(1, 0, 0); // Direita local
+        dir.applyAxisAngle(new THREE.Vector3(0, 1, 0), localPlayerMesh.rotation.y);
+        localPlayerMesh.position.addScaledVector(dir, inputs.turn * speed);
+        moved = true;
+    }
 
-    // Enviar dados ao servidor apenas se moveu
+    // Atualiza Câmera (Segue o jogador de trás e um pouco acima)
+    const relativeCameraOffset = new THREE.Vector3(0, 5, 10);
+    // Aplica a rotação do jogador ao offset da câmera para que ela gire junto
+    const cameraOffset = relativeCameraOffset.applyMatrix4(localPlayerMesh.matrixWorld);
+    
+    // Interpolação suave da câmera (Lerp)
+    camera.position.lerp(cameraOffset, 0.1);
+    camera.lookAt(localPlayerMesh.position.x, localPlayerMesh.position.y + 2, localPlayerMesh.position.z);
+
+    // Rede
     if (moved) {
         socket.emit('playerMove', {
             x: localPlayerMesh.position.x,
@@ -180,21 +210,44 @@ function processInput() {
     }
 }
 
-// --- LOOP DE RENDERIZAÇÃO ---
+// --- SOCKET EVENTS (REMOTOS) ---
+socket.on('currentPlayers', (players) => {
+    Object.keys(players).forEach((id) => {
+        if (id !== socket.id) addRemotePlayer(id, players[id]);
+    });
+});
+socket.on('newPlayer', (p) => addRemotePlayer(p.id, p));
+socket.on('playerDisconnect', (id) => {
+    if (remotePlayers[id]) { scene.remove(remotePlayers[id]); delete remotePlayers[id]; }
+});
+socket.on('playerMoved', (data) => {
+    const p = remotePlayers[data.id];
+    if (p) {
+        p.position.set(data.x, data.y, data.z);
+        p.rotation.y = data.rotation;
+    }
+});
+
+function addRemotePlayer(id, data) {
+    gltfLoader.load('./assets/player.glb', (gltf) => {
+        const mesh = gltf.scene;
+        mesh.position.set(data.x, data.y, data.z);
+        mesh.rotation.y = data.rotation;
+        scene.add(mesh);
+        remotePlayers[id] = mesh;
+    });
+}
+
 function animate() {
     requestAnimationFrame(animate);
-    
     processInput();
-    
     renderer.render(scene, camera);
 }
 
-// Ajuste de janela
 window.addEventListener('resize', () => {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-// Inicia tudo
 initWorld();
